@@ -1,0 +1,12 @@
+# Ignorer les fichiers de données téléchargés
+data/DVSGesture/*.tar.gz
+data/DVSGesture/ibmGestureTrain/
+data/DVSGesture/ibmGestureTest/
+
+
+# Ignorer les fichiers compilés Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
