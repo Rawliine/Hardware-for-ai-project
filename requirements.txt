@@ -4,3 +4,4 @@ torchaudio
 tonic
 spikingjelly
 matplotlib
+pynvml
