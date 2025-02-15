@@ -5,3 +5,4 @@ tonic
 spikingjelly
 matplotlib
 pynvml
+pandas
