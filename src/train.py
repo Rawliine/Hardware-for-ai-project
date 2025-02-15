@@ -24,7 +24,7 @@ from src.evaluate import (
 
 # Global configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 
 ##############################
 # Helper functions
@@ -130,7 +130,8 @@ def run_experiment_cnn(params):
     """Runs one experiment for the CNN given a set of hyperparameters."""
     print("\n=== Running CNN Experiment ===")
     print("Hyperparameters:", params)
-    train_loader, test_loader = get_dataloaders(batch_size=BATCH_SIZE)
+    train_loader, test_loader = get_dataloaders(batch_size=BATCH_SIZE, num_workers=8, pin_memory=True)
+
     
     model = CNNModel(num_channels=5, num_classes=11, arch=params["arch"]).to(DEVICE)
     criterion = nn.CrossEntropyLoss()
@@ -170,7 +171,8 @@ def run_experiment_snn(params):
     """
     print("\n=== Running SNN Experiment ===")
     print("Hyperparameters:", params)
-    train_loader, test_loader = get_dataloaders(batch_size=BATCH_SIZE)
+    train_loader, test_loader = get_dataloaders(batch_size=BATCH_SIZE, num_workers=8, pin_memory=True)
+
     
     model = SNNModel(num_channels=5, num_classes=11, time_window=params["time_window"], arch=params["arch"]).to(DEVICE)
     

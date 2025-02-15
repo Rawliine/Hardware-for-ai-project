@@ -29,13 +29,24 @@ class Float32Wrapper(Dataset):
         label = torch.tensor(label, dtype=torch.long)
         return event_tensor, label
 
-def get_dataloaders(batch_size=32):
-    """Charge les datasets et retourne les DataLoaders d'entraînement et de test."""
-    train_dataset = Float32Wrapper(tonic.datasets.DVSGesture(save_to="./data", train=True, transform=transform))
-    test_dataset  = Float32Wrapper(tonic.datasets.DVSGesture(save_to="./data", train=False, transform=transform))
+def get_dataloaders(batch_size=32, num_workers=8, pin_memory=True):
+    """Charge les datasets et retourne les DataLoaders d'entraînement et de test avec des workers optimisés."""
+    # Assuming `transform` is defined in your scope
+    train_dataset = Float32Wrapper(
+        tonic.datasets.DVSGesture(save_to="./data", train=True, transform=transform)
+    )
+    test_dataset = Float32Wrapper(
+        tonic.datasets.DVSGesture(save_to="./data", train=False, transform=transform)
+    )
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=pin_memory
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory
+    )
     
     return train_loader, test_loader
 
