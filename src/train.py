@@ -1,17 +1,20 @@
 """
 train.py
-Full implementation of automated hyperparameter testing for CNN and SNN experiments
-on the DVSGesture dataset. This version now includes a "super_deep" (ResNet-18) architecture
-for both CNN and SNN models and an improved STDP update mechanism.
+Full implementation of automated hyperparameter testing using Bayesian optimization (Optuna)
+for CNN and SNN experiments on the DVSGesture dataset. This version includes a "super_deep" (ResNet-18)
+architecture option for both CNN and SNN models and an improved STDP update mechanism.
+It also saves interim results to Excel during the experiment and checkpoints each trained model.
 """
 
 import time
 import itertools
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import pandas as pd
+import optuna
 
 from src.data import prepare_input, get_dataloaders
 from src.models import CNNModel, SNNModel
@@ -24,7 +27,7 @@ from src.evaluate import (
 
 # Global configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 
 ##############################
 # Helper functions
@@ -123,24 +126,20 @@ def train_model_snn_stdp(model, train_loader, epochs, stdp_lr, spike_rate_target
     return
 
 ##############################
-# Experiment functions
+# Experiment functions (with model saving)
 ##############################
 
 def run_experiment_cnn(params):
-    """Runs one experiment for the CNN given a set of hyperparameters."""
     print("\n=== Running CNN Experiment ===")
     print("Hyperparameters:", params)
     train_loader, test_loader = get_dataloaders(batch_size=BATCH_SIZE, num_workers=8, pin_memory=True)
-
     
     model = CNNModel(num_channels=5, num_classes=11, arch=params["arch"]).to(DEVICE)
     criterion = nn.CrossEntropyLoss()
     optimizer = get_optimizer(model, params["optimizer"], params["lr"])
     
     print("\nMeasuring energy during CNN training...")
-    train_energy, _ = measure_energy_nvml(
-        train_model, model, train_loader, criterion, optimizer, epochs=params["epochs"], noise_level=params["noise"]
-    )
+    train_energy, _ = measure_energy_nvml(train_model, model, train_loader, criterion, optimizer, epochs=params["epochs"], noise_level=params["noise"])
     print(f"CNN Training Energy: {train_energy:.4f} J")
     
     print("\nEvaluating CNN...")
@@ -149,6 +148,11 @@ def run_experiment_cnn(params):
     
     cnn_macs = estimate_energy_cnn(model, input_shape=(5, 128, 128))
     print(f"Estimated CNN MACs: {cnn_macs}")
+    
+    # Save the model immediately
+    model_filename = f"saved_models/cnn_{params['arch']}_{int(time.time())}.pt"
+    torch.save(model.state_dict(), model_filename)
+    print(f"Saved CNN model to {model_filename}")
     
     result = {
         "Model": "CNN",
@@ -160,19 +164,15 @@ def run_experiment_cnn(params):
         "train_energy_J": train_energy,
         "test_accuracy_%": test_accuracy,
         "test_latency_s": test_latency,
-        "estimated_MACs": cnn_macs
+        "estimated_MACs": cnn_macs,
+        "model_file": model_filename
     }
     return result
 
 def run_experiment_snn(params):
-    """
-    Runs one experiment for the SNN given a set of hyperparameters.
-    Depending on the training method, either standard backprop (BP-STDP) or the custom STDP training is used.
-    """
     print("\n=== Running SNN Experiment ===")
     print("Hyperparameters:", params)
     train_loader, test_loader = get_dataloaders(batch_size=BATCH_SIZE, num_workers=8, pin_memory=True)
-
     
     model = SNNModel(num_channels=5, num_classes=11, time_window=params["time_window"], arch=params["arch"]).to(DEVICE)
     
@@ -180,16 +180,12 @@ def run_experiment_snn(params):
         criterion = nn.CrossEntropyLoss()
         optimizer = get_optimizer(model, params["optimizer"], params["lr"])
         print("\nMeasuring energy during SNN (BP-STDP) training...")
-        train_energy, _ = measure_energy_nvml(
-            train_model, model, train_loader, criterion, optimizer, epochs=params["epochs"], noise_level=params["noise"]
-        )
+        train_energy, _ = measure_energy_nvml(train_model, model, train_loader, criterion, optimizer, epochs=params["epochs"], noise_level=params["noise"])
     else:  # Use improved STDP training
         stdp_lr = params["lr"]
-        spike_rate_target = params["spike_rate"]  # Not directly used in the improved update, but kept for record
+        spike_rate_target = params["spike_rate"]
         print("\nMeasuring energy during SNN (STDP) training...")
-        train_energy, _ = measure_energy_nvml(
-            train_model_snn_stdp, model, train_loader, epochs=params["epochs"], stdp_lr=stdp_lr, spike_rate_target=spike_rate_target, noise_level=params["noise"]
-        )
+        train_energy, _ = measure_energy_nvml(train_model_snn_stdp, model, train_loader, epochs=params["epochs"], stdp_lr=stdp_lr, spike_rate_target=spike_rate_target, noise_level=params["noise"])
     
     print(f"SNN Training Energy: {train_energy:.4f} J")
     
@@ -199,6 +195,11 @@ def run_experiment_snn(params):
     
     snn_ops = estimate_energy_snn(model, input_shape=(5, 128, 128), time_window=params["time_window"], spike_rate=params["spike_rate"])
     print(f"Estimated SNN Spike Operations: {snn_ops}")
+    
+    # Save the model immediately
+    model_filename = f"saved_models/snn_{params['arch']}_{int(time.time())}.pt"
+    torch.save(model.state_dict(), model_filename)
+    print(f"Saved SNN model to {model_filename}")
     
     result = {
         "Model": "SNN",
@@ -213,71 +214,102 @@ def run_experiment_snn(params):
         "train_energy_J": train_energy,
         "test_accuracy_%": test_accuracy,
         "test_latency_s": test_latency,
-        "estimated_spike_ops": snn_ops
+        "estimated_spike_ops": snn_ops,
+        "model_file": model_filename
     }
     return result
 
-def main_experiment():
-    all_results = []
+##############################
+# Optuna objective functions
+##############################
+
+def objective_cnn(trial):
+    # Define hyperparameters using trial suggestions
+    epochs = trial.suggest_categorical("epochs", [10, 30])
+    lr = trial.suggest_categorical("lr", [0.001, 0.01, 0.1])
+    noise = trial.suggest_categorical("noise", [0.0, 0.1, 0.2])
+    arch = trial.suggest_categorical("arch", ["simple", "super_deep"])
+    optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD", "RMSProp"])
     
-    # Define hyperparameter grids for CNN experiments
-    cnn_epochs_list = [10, 50, 100, 200]
-    lr_list = [0.001, 0.01, 0.1]
-    noise_list = [0.0, 0.05, 0.1, 0.2]
-    arch_list = ["simple", "deep", "super_deep"]
-    optimizer_list = ["Adam", "SGD", "RMSProp"]
+    params = {
+        "epochs": epochs,
+        "lr": lr,
+        "noise": noise,
+        "arch": arch,
+        "optimizer": optimizer_name
+    }
     
-    for (epochs, lr, noise, arch, opt_name) in itertools.product(cnn_epochs_list, lr_list, noise_list, arch_list, optimizer_list):
+    result = run_experiment_cnn(params)
+    # We want to maximize test accuracy, so return negative accuracy for minimization.
+    return -result["test_accuracy_%"]
+
+def objective_snn(trial):
+    epochs = trial.suggest_categorical("epochs", [10, 30])
+    lr = trial.suggest_categorical("lr", [0.001, 0.01, 0.1])
+    noise = trial.suggest_categorical("noise", [0.0, 0.1, 0.2])
+    arch = trial.suggest_categorical("arch", ["simple", "super_deep"])
+    time_window = trial.suggest_categorical("time_window", [5, 20, 50])
+    spike_rate = trial.suggest_categorical("spike_rate", [0.1, 1.0])
+    training_method = trial.suggest_categorical("training_method", ["BP-STDP", "STDP"])
+    
+    if training_method == "BP-STDP":
+        optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD", "RMSProp"])
         params = {
             "epochs": epochs,
             "lr": lr,
             "noise": noise,
             "arch": arch,
-            "optimizer": opt_name
+            "time_window": time_window,
+            "spike_rate": spike_rate,
+            "training_method": training_method,
+            "optimizer": optimizer_name
         }
-        res = run_experiment_cnn(params)
-        all_results.append(res)
+    else:
+        params = {
+            "epochs": epochs,
+            "lr": lr,
+            "noise": noise,
+            "arch": arch,
+            "time_window": time_window,
+            "spike_rate": spike_rate,
+            "training_method": training_method
+        }
     
-    # Define hyperparameter grids for SNN experiments
-    snn_epochs_list = [10, 50, 100, 200]
-    time_window_list = [5, 10, 20, 50]  # timesteps
-    spike_rate_list = [0.1, 0.5, 1.0]     # target spike rates (for record)
-    training_method_list = ["BP-STDP", "STDP"]
-    
-    for (epochs, lr, noise, arch, time_window, spike_rate, training_method) in itertools.product(
-            snn_epochs_list, lr_list, noise_list, arch_list, time_window_list, spike_rate_list, training_method_list):
-        if training_method == "BP-STDP":
-            for opt_name in optimizer_list:
-                params = {
-                    "epochs": epochs,
-                    "lr": lr,
-                    "noise": noise,
-                    "arch": arch,
-                    "time_window": time_window,
-                    "spike_rate": spike_rate,
-                    "training_method": training_method,
-                    "optimizer": opt_name
-                }
-                res = run_experiment_snn(params)
-                all_results.append(res)
-        else:
-            params = {
-                "epochs": epochs,
-                "lr": lr,
-                "noise": noise,
-                "arch": arch,
-                "time_window": time_window,
-                "spike_rate": spike_rate,
-                "training_method": training_method
-            }
-            res = run_experiment_snn(params)
-            all_results.append(res)
-    
-    # Save results to an Excel file
-    df = pd.DataFrame(all_results)
-    excel_filename = "experiment_results.xlsx"
+    result = run_experiment_snn(params)
+    return -result["test_accuracy_%"]
+
+##############################
+# Optuna callback to save interim results to Excel
+##############################
+
+def save_results_callback(study, trial):
+    df = study.trials_dataframe()
+    excel_filename = f"{study.study_name}_results.xlsx"
     df.to_excel(excel_filename, index=False)
-    print(f"\n===== ALL EXPERIMENTS COMPLETED. RESULTS SAVED TO {excel_filename} =====")
+    print(f"Saved interim results to {excel_filename}")
+
+##############################
+# Main function for Optuna hyperparameter search
+##############################
+
+def main_experiment():
+    os.makedirs("saved_models", exist_ok=True)
+    
+    # Run CNN experiments using Optuna
+    cnn_study = optuna.create_study(direction="minimize", study_name="cnn_study")
+    cnn_study.optimize(objective_cnn, n_trials=40, callbacks=[save_results_callback])
+    
+    # Run SNN experiments using Optuna
+    snn_study = optuna.create_study(direction="minimize", study_name="snn_study")
+    snn_study.optimize(objective_snn, n_trials=40, callbacks=[save_results_callback])
+    
+    # Save combined results
+    cnn_df = cnn_study.trials_dataframe()
+    snn_df = snn_study.trials_dataframe()
+    combined_df = pd.concat([cnn_df, snn_df], ignore_index=True)
+    combined_excel = "combined_experiment_results.xlsx"
+    combined_df.to_excel(combined_excel, index=False)
+    print(f"\n===== ALL EXPERIMENTS COMPLETED. Combined results saved to {combined_excel} =====")
 
 if __name__ == "__main__":
     main_experiment()

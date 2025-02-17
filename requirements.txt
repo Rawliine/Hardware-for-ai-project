@@ -6,3 +6,5 @@ spikingjelly
 matplotlib
 pynvml
 pandas
+optuna
+openpyxl
